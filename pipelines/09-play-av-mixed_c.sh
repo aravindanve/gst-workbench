@@ -1,7 +1,10 @@
 # see https://gstreamer.freedesktop.org/data/doc/gstreamer/head/gst-plugins-good-plugins/html/gst-plugins-good-plugins-videomixer.html
 # see https://gstreamer.freedesktop.org/data/doc/gstreamer/head/gst-plugins-base-plugins/html/gst-plugins-base-plugins-audiomixer.html
 
-gst-launch-1.0 \
+# clean up
+rm ../dots/*
+
+GST_DEBUG_DUMP_DOT_DIR=../dots gst-launch-1.0 \
     audiomixer name=amixer \
     ! autoaudiosink \
     videomixer name=vmixer \

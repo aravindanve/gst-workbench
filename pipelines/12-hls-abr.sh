@@ -5,6 +5,7 @@
 
 # clean up
 rm -rf ../outputs/12-hls-abr/
+rm ../dots/*
 
 # create output dirs
 mkdir -p ../outputs/12-hls-abr/160p/
@@ -33,7 +34,7 @@ cat << EOF >> ../outputs/12-hls-abr/master.m3u8
 EOF
 
 # launch
-gst-launch-1.0 -v \
+GST_DEBUG_DUMP_DOT_DIR=../dots gst-launch-1.0 -v \
     mpegtsmux name=muxer160 `# mpegtsmux or hlssink does not work properly video is not sink_0` \
     ! hlssink \
         location=../outputs/12-hls-abr/160p/chunk%05d.ts \

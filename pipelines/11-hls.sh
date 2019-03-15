@@ -4,9 +4,10 @@
 # clean up
 rm -rf ../outputs/11-hls/
 mkdir -p ../outputs/11-hls/
+rm ../dots/*
 
 # launch
-gst-launch-1.0 -v \
+GST_DEBUG_DUMP_DOT_DIR=../dots gst-launch-1.0 -v \
     mpegtsmux name=muxer `# mpegtsmux or hlssink does not work properly video is not sink_0` \
     ! hlssink \
         location=../outputs/11-hls/chunk%05d.ts \

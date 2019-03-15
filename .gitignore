@@ -29,6 +29,7 @@ benchmarks/graphs
 # local
 _/
 outputs/
+dots/
 
 # exceptions
 !outputs/10-mpegts.ts
