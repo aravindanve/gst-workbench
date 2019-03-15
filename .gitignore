@@ -29,3 +29,7 @@ benchmarks/graphs
 # local
 _/
 media/
+outputs/
+
+# exceptions
+!outputs/10-mpegts.ts
