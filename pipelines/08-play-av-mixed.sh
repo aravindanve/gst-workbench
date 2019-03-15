@@ -11,7 +11,7 @@ gst-launch-1.0 \
         sink_2::alpha=1 sink_2::zorder=2 sink_2::xpos=1420 sink_2::ypos=395 \
         sink_3::alpha=1 sink_3::zorder=3 sink_3::xpos=1420 sink_3::ypos=685 \
     ! autovideosink \
-    filesrc location=../media/wave.mp4 \
+    filesrc location=../media/montreal.mp4 \
     ! decodebin name=decoder_0 \
     decoder_0. \
     ! queue \
@@ -24,7 +24,7 @@ gst-launch-1.0 \
     ! video/x-raw,width=1920,height=1080 \
     ! timeoverlay \
     ! vmixer. \
-    filesrc location=../media/montreal.mp4 \
+    filesrc location=../media/wave.mp4 \
     ! decodebin name=decoder_1 \
     decoder_1. \
     ! queue \
