@@ -7,7 +7,7 @@ mkdir -p ../outputs/11-hls/
 
 # launch
 gst-launch-1.0 -v \
-    mpegtsmux name=muxer \
+    mpegtsmux name=muxer `# mpegtsmux or hlssink does not work properly video is not sink_0` \
     ! hlssink \
         location=../outputs/11-hls/chunk%05d.ts \
         max-files=16 \
