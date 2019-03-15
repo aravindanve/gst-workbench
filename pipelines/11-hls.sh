@@ -1,6 +1,11 @@
 # see https://gstreamer.freedesktop.org/data/doc/gstreamer/head/gst-plugins-good-plugins/html/gst-plugins-good-plugins-videomixer.html
 # see https://gstreamer.freedesktop.org/data/doc/gstreamer/head/gst-plugins-base-plugins/html/gst-plugins-base-plugins-audiomixer.html
 
+# clean up
+rm -rf ../outputs/11-hls/
+mkdir -p ../outputs/11-hls/
+
+# launch
 gst-launch-1.0 -v \
     mpegtsmux name=muxer \
     ! hlssink \
@@ -16,12 +21,13 @@ gst-launch-1.0 -v \
         sink_2::alpha=1 sink_2::zorder=2 sink_2::xpos=1420 sink_2::ypos=395 \
         sink_3::alpha=1 sink_3::zorder=3 sink_3::xpos=1420 sink_3::ypos=685 \
     ! x264enc \
+    ! video/x-h264,profile=high \
     ! muxer. \
     audiomixer name=amixer \
     ! audioresample \
     ! faac \
     ! muxer. \
-    filesrc location=../media/wave.mp4 \
+    filesrc location=../media/montreal.mp4 \
     ! decodebin name=decoder_0 \
     decoder_0. \
     ! queue \
@@ -37,7 +43,7 @@ gst-launch-1.0 -v \
     ! video/x-raw,width=1920,height=1080 \
     ! timeoverlay \
     ! vmixer. \
-    filesrc location=../media/montreal.mp4 \
+    filesrc location=../media/wave.mp4 \
     ! decodebin name=decoder_1 \
     decoder_1. \
     ! queue \
