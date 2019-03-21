@@ -3,23 +3,12 @@
 import gi
 import signal
 import sys
-from threading import Thread, Event
 
 gi.require_version('Gst', '1.0')
 
 from gi.repository import Gst, GLib
 
 SRC_CAPS_VP8 = 'application/x-rtp,media=video,clock-rate=90000,encoding-name=VP8,payload=101'
-
-class IntervalTimer(Thread):
-    def __init__(self, callback, interval=0.5, stopFlag=Event()):
-        super().__init__()
-        self.callback = callback
-        self.stopFlag = stopFlag
-
-    def run(self):
-        while not self.stopFlag.wait(0.5):
-            self.callback()
 
 class Switcher:
     def __init__(self):
@@ -30,11 +19,6 @@ class Switcher:
         src0.set_property('is-live', 'true')
         src0.set_property('pattern', 'snow')
         pipeline.add(src0)
-
-        src1 = Gst.ElementFactory.make('videotestsrc')
-        src1.set_property('is-live', 'true')
-        src1.set_property('pattern', 'pinwheel')
-        pipeline.add(src1)
 
         rtpbin = Gst.ElementFactory.make('rtpbin', 'rtpbin')
         pipeline.add(rtpbin)
@@ -69,8 +53,6 @@ class Switcher:
         selector.link(videosink)
         src0.link_filtered(selector, Gst.caps_from_string(
             'video/x-raw,format=I420,width=640,height=360'))
-        src1.link_filtered(selector, Gst.caps_from_string(
-            'video/x-raw,format=YUY2,width=640,height=360'))
         vp8depay.link(vp8dec)
         vp8dec.link(selector)
         Gst.Pad.link(
@@ -89,20 +71,7 @@ class Switcher:
         bus = pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect('message', self.on_message)
-        rtpbin.connect('pad-added', self.on_rtpbin_pad_added, vp8depay)
-
-        active_pad_index = 0
-        def switch():
-            nonlocal active_pad_index
-            if active_pad_index == len(selector.sinkpads) - 1:
-                active_pad_index = 0
-            else:
-                active_pad_index += 1
-            selector.set_property('active-pad', selector.sinkpads[active_pad_index])
-
-        timerStopFlag = Event()
-        timer = IntervalTimer(switch, 3, timerStopFlag)
-        timer.start()
+        rtpbin.connect('pad-added', self.on_rtpbin_pad_added, vp8depay, selector)
 
         f = open('../dots/18-initial.dot', 'w')
         f.write(Gst.debug_bin_to_dot_data(pipeline, Gst.DebugGraphDetails.ALL))
@@ -111,15 +80,17 @@ class Switcher:
         pipeline.set_state(Gst.State.PLAYING)
         self.pipeline = pipeline
         self.destroyed = False
-        self.timerStopFlag = timerStopFlag
-        self.timer = timer
 
-    def on_rtpbin_pad_added(self, rtpbin, pad, depay):
+    def on_rtpbin_pad_added(self, rtpbin, pad, depay, selector):
         print('Switcher.on_rtpbin_pad_added')
         Gst.Pad.link(pad, Gst.Element.get_static_pad(depay, 'sink'))
+        print(selector.get_property('active-pad'))
+        print(selector.sinkpads)
+        selector.set_property('active-pad', selector.sinkpads[-1])
 
         f = open('../dots/18-rtp-pad-added.dot', 'w')
-        f.write(Gst.debug_bin_to_dot_data(self.pipeline, Gst.DebugGraphDetails.ALL))
+        f.write(Gst.debug_bin_to_dot_data(
+            self.pipeline, Gst.DebugGraphDetails.ALL))
         f.close()
 
     def on_message(self, bus, message):
@@ -129,8 +100,7 @@ class Switcher:
             self.pipeline.set_state(Gst.State.NULL)
             err, debug = message.parse_error()
             print('message:ERROR %s' % err, debug)
-        else:
-            print(message.type)
+        else: pass
 
     def destroy(self):
         if not self.destroyed:
@@ -138,7 +108,6 @@ class Switcher:
             self.pipeline.get_bus().remove_signal_watch()
             self.pipeline = None
             self.destroyed = True
-            self.timerStopFlag.set()
 
 if __name__ == '__main__':
     Gst.init(None)
