@@ -239,7 +239,7 @@ class RtpStream:
         Gst.Pad.link(grtcpsrcpad, recvrtcpsinkpad)
 
         self.rtpsrcbin.set_state(Gst.State.PLAYING)
-        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_init%d' % self.session)
+        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_init_%d' % self.session)
 
         rtpmixer.rtpstreams[self.id] = self
         rtpmixer.rtpsession_counter += 1
@@ -281,7 +281,7 @@ class RtpStream:
         elif self.encoding_name == 'OPUS':
             pass # FIXME
 
-        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_prestart%d' % self.session)
+        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_prestart_%d' % self.session)
 
     def _link_rtpdecodebin(self, srcpad):
         # FIXME: check if already linked and unlink before linking
@@ -291,7 +291,7 @@ class RtpStream:
         self.rtpdecodebin.add_pad(gsinkpad)
 
         Gst.Pad.link(srcpad, gsinkpad)
-        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_start%d' % self.session)
+        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_start_%d' % self.session)
 
     def _on_ssrc_srcpad_added(self, srcpad):
         if not self.rtpdecodebin:
