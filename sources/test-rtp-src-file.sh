@@ -68,6 +68,7 @@ gst-launch-1.0 -v \
     ! rtpbin.recv_rtcp_sink_1 \
     multiqueue name=multiq \
     multifilesrc \
+        loop=true \
         location=../media/lava.mkv \
     ! matroskademux name=demux \
     demux. \
