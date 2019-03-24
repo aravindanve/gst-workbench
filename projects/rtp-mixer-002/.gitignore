@@ -1,2 +1,2 @@
 *.dot
-*.pyc
+__pycache__
