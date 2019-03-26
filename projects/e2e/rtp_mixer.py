@@ -28,8 +28,8 @@ class UnsupportedException(Exception):
 class RtpMixerOptions:
     def __init__(self, **kwargs):
         self.debug = kwargs.get('debug', False)
-        self.default_pattern = kwargs.get('default_pattern') or 'snow'
-        self.default_wave = kwargs.get('default_wave') or 'sine'
+        self.default_pattern = kwargs.get('default_pattern') or 'black'
+        self.default_wave = kwargs.get('default_wave') or 'silence'
         self.background = kwargs.get('background') or 'black'
         self.width = kwargs.get('width') or 1280
         self.height = kwargs.get('height') or 720
@@ -93,8 +93,8 @@ class RtpMixer:
         self.audiomixer = Gst.ElementFactory.make('audiomixer', 'audiomixer0')
         self.pipeline.add(self.audiomixer)
 
-        self.multiq = Gst.ElementFactory.make('multiqueue', 'multiq0')
-        self.pipeline.add(self.multiq)
+        self.multiqueue = Gst.ElementFactory.make('multiqueue', 'multiqueue0')
+        self.pipeline.add(self.multiqueue)
 
         # FIXME: replace autovideosink with rtpsink
         self.videosink = Gst.ElementFactory.make('autovideosink', 'videosink0')
@@ -107,8 +107,8 @@ class RtpMixer:
         videomixer_capsfilter_srcpad = self.videomixer_capsfilter.get_static_pad('src')
         videomixer_capsfilter_sinkpad = self.videomixer_capsfilter.get_static_pad('sink')
         videomixer_srcpad = self.videomixer.get_static_pad('src')
-        videoqueue_sinkpad = self.multiq.get_request_pad('sink_0')
-        videoqueue_srcpad = self.multiq.get_static_pad('src_0')
+        videoqueue_sinkpad = self.multiqueue.get_request_pad('sink_0')
+        videoqueue_srcpad = self.multiqueue.get_static_pad('src_0')
         videosink_sinkpad = self.videosink.get_static_pad('sink')
 
         Gst.Pad.link(videomixer_srcpad, videomixer_capsfilter_sinkpad)
@@ -118,8 +118,8 @@ class RtpMixer:
         Gst.Element.link(self.videosrc, self.videosrc_capsfilter)
 
         audiomixer_srcpad = self.audiomixer.get_static_pad('src')
-        audioqueue_sinkpad = self.multiq.get_request_pad('sink_1')
-        audioqueue_srcpad = self.multiq.get_static_pad('src_1')
+        audioqueue_sinkpad = self.multiqueue.get_request_pad('sink_1')
+        audioqueue_srcpad = self.multiqueue.get_static_pad('src_1')
         audiosink_sinkpad = self.audiosink.get_static_pad('sink')
 
         Gst.Pad.link(audiomixer_srcpad, audioqueue_sinkpad)
@@ -341,16 +341,17 @@ class RtpStream:
                 defaultsrcpad = self.rtpmixer.audiosrc_capsfilter.get_static_pad('src')
 
             Gst.Pad.link(defaultsrcpad, sinkpad)
-            defaultsrcpad.set_active(True)
+            # defaultsrcpad.set_active(True)
 
         if self.media == 'video':
-            self.rtpmixer.videosrc.get_static_pad('src').set_active(False)
+            # self.rtpmixer.videosrc.get_static_pad('src').set_active(False)
             self.rtpmixer.videosrc.get_static_pad('src').set_active(True)
 
         elif self.media == 'audio':
-            self.rtpmixer.audiosrc.get_static_pad('src').set_active(False)
+            # self.rtpmixer.audiosrc.get_static_pad('src').set_active(False)
             self.rtpmixer.audiosrc.get_static_pad('src').set_active(True)
 
+        self.rtpmixer.rtpstreams.pop(self.id, None)
         self.rtpmixer = None
         self.rtpsrcbin = None
         self.rtpdecodebin = None
@@ -437,8 +438,14 @@ class RtpStream:
             defaultsrcpad = self.rtpmixer.audiosrc_capsfilter.get_static_pad('src')
 
         if defaultsrcpad.is_linked():
+            if self.media == 'video':
+                self.rtpmixer.videosrc.get_static_pad('src').set_active(False)
+
+            elif self.media == 'audio':
+                self.rtpmixer.audiosrc.get_static_pad('src').set_active(False)
+
             sinkpad = defaultsrcpad.get_peer()
-            defaultsrcpad.set_active(False)
+            # defaultsrcpad.set_active(False)
             Gst.Pad.unlink(defaultsrcpad, sinkpad)
 
         elif self.media == 'video':
@@ -486,7 +493,11 @@ if __name__ == '__main__':
     Gst.init(None)
     Gst.debug_set_active(True)
     Gst.debug_set_default_threshold(Gst.DebugLevel.FIXME)
-    rtpmixer = RtpMixer(debug=True)
+    rtpmixer = RtpMixer(
+        debug=True,
+        default_pattern='snow',
+        default_wave='sine')
+
     rtpmixer.start()
 
     videortpstream = None
