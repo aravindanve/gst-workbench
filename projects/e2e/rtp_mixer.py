@@ -30,11 +30,12 @@ class UnsupportedException(Exception):
 
 class RtpMixerOptions:
     def __init__(self, **kwargs):
-        self.debug = kwargs.get('debug', False)
+        self.debug = kwargs.get('debug', False) # FIXME: change to debug_graph
+        # self.preview = kwargs.get('debug_preview', False)
         self.videosrc_pattern = kwargs.get('videosrc_pattern', 'snow')
         self.videosrc_caps = kwargs.get('videosrc_caps', 'video/x-raw,format=I420,framerate=30/1,width=1280,height=720')
         self.audiosrc_wave = kwargs.get('audiosrc_wave', 'sine')
-        self.audiosrc_caps = kwargs.get('audiosrc_caps', 'audio/x-raw,format=S16LE,rate=44100,channels=1,layout=interleaved')
+        self.audiosrc_caps = kwargs.get('audiosrc_caps', 'audio/x-raw,format=F32LE,rate=44100,channels=1,layout=interleaved')
         self.videomixer_background = kwargs.get('videomixer_background', 'black')
 
 class RtpMixer:
@@ -52,6 +53,7 @@ class RtpMixer:
 
         self.rtpbin = Gst.ElementFactory.make('rtpbin', 'rtpbin0')
         self.rtpbin.set_property('autoremove', True)
+        self.rtpbin.set_property('drop-on-latency', True)
         self.pipeline.add(self.rtpbin)
 
         self.videosrc = Gst.ElementFactory.make('videotestsrc', 'videosrc0')
@@ -79,6 +81,9 @@ class RtpMixer:
         self.audiomixer = Gst.ElementFactory.make('audiomixer', 'audiomixer0')
         self.pipeline.add(self.audiomixer)
 
+        self.multiq = Gst.ElementFactory.make('multiqueue', 'multiq0')
+        self.pipeline.add(self.multiq)
+
         # FIXME: replace autovideosink with rtpsink
         self.videosink = Gst.ElementFactory.make('autovideosink', 'videosink0')
         self.pipeline.add(self.videosink)
@@ -87,11 +92,23 @@ class RtpMixer:
         self.audiosink = Gst.ElementFactory.make('autoaudiosink', 'audiosink0')
         self.pipeline.add(self.audiosink)
 
-        Gst.Element.link(self.videomixer, self.videosink)
+        videomixer_srcpad = self.videomixer.get_static_pad('src')
+        videoqueue_sinkpad = self.multiq.get_request_pad('sink_0')
+        videoqueue_srcpad = self.multiq.get_static_pad('src_0')
+        videosink_sinkpad = self.videosink.get_static_pad('sink')
+
+        Gst.Pad.link(videomixer_srcpad, videoqueue_sinkpad)
+        Gst.Pad.link(videoqueue_srcpad, videosink_sinkpad)
         Gst.Element.link(self.videosrc_capsfilter, self.videomixer)
         Gst.Element.link(self.videosrc, self.videosrc_capsfilter)
 
-        Gst.Element.link(self.audiomixer, self.audiosink)
+        audiomixer_srcpad = self.audiomixer.get_static_pad('src')
+        audioqueue_sinkpad = self.multiq.get_request_pad('sink_1')
+        audioqueue_srcpad = self.multiq.get_static_pad('src_1')
+        audiosink_sinkpad = self.audiosink.get_static_pad('sink')
+
+        Gst.Pad.link(audiomixer_srcpad, audioqueue_sinkpad)
+        Gst.Pad.link(audioqueue_srcpad, audiosink_sinkpad)
         Gst.Element.link(self.audiosrc_capsfilter, self.audiomixer)
         Gst.Element.link(self.audiosrc, self.audiosrc_capsfilter)
 
@@ -100,6 +117,7 @@ class RtpMixer:
         self.bus.connect('message', self._on_bus_message)
         self.rtpbin.connect('pad-added', self._on_rtpbin_pad_added)
         self.rtpbin.connect('pad-removed', self._on_rtpbin_pad_removed)
+
         debug_graph(self.debug, self.pipeline, 'rtpmixer_init')
 
     def dispose(self):
@@ -107,10 +125,12 @@ class RtpMixer:
 
     def start(self):
         self.pipeline.set_state(Gst.State.PLAYING)
+
         debug_graph(self.debug, self.pipeline, 'rtpmixer_start')
 
     def stop(self):
         self.pipeline.set_state(Gst.State.PAUSED)
+
         debug_graph(self.debug, self.pipeline, 'rtpmixer_stop')
 
     def add_stream(self, **kwargs):
@@ -124,7 +144,17 @@ class RtpMixer:
             return self.rtpstreams[rtpstream_id]
 
     def _on_bus_message(self, bus, message):
-        pass # FIXME
+        if message.type == Gst.MessageType.QOS:
+            pass
+        if message.type == Gst.MessageType.EOS:
+            self.dispose()
+        elif message.type == Gst.MessageType.ERROR:
+            self.pipeline.set_state(Gst.State.NULL)
+            err, debug = message.parse_error()
+            print('message:ERROR %s' % err, debug)
+        else:
+            # print(message.type)
+            pass
 
     def _on_rtpbin_pad_added(self, rtpbin, pad):
         self.debug and print('RtpMixer._on_rtpbin_pad_added()', pad.get_name())
@@ -251,46 +281,110 @@ class RtpStream:
         if self.rtpdecodebin:
             raise Exception('RtpStream rtpdecodebin already initialized')
 
+        self.rtpdecodebin = Gst.Bin('rtpdecodebin%d' % self.session)
+
         if self.encoding_name == 'VP8':
-            self.rtpdecodebin = Gst.Bin('rtpdecodebin%d' % self.session)
-
             self.rtpdecodebin.depay = Gst.ElementFactory.make('rtpvp8depay', 'depay0')
-            self.rtpdecodebin.add(self.rtpdecodebin.depay)
-
             self.rtpdecodebin.dec = Gst.ElementFactory.make('vp8dec', 'dec0')
-            self.rtpdecodebin.add(self.rtpdecodebin.dec)
 
-            Gst.Element.link(self.rtpdecodebin.depay, self.rtpdecodebin.dec)
+        elif self.encoding_name == 'H264':
+            self.rtpdecodebin.depay = Gst.ElementFactory.make('rtph264depay', 'depay0')
+            self.rtpdecodebin.dec = Gst.ElementFactory.make('avdec_h264', 'dec0')
 
-            self.rtpdecodebin.set_state(Gst.State.PLAYING)
-            self.rtpmixer.pipeline.add(self.rtpdecodebin)
+        elif self.encoding_name == 'OPUS':
+            self.rtpdecodebin.depay = Gst.ElementFactory.make('rtpopusdepay', 'depay0')
+            self.rtpdecodebin.dec = Gst.ElementFactory.make('opusdec', 'dec0')
 
-            srcpad = self.rtpdecodebin.dec.get_static_pad('src')
-            gsrcpad = Gst.GhostPad.new('src', srcpad)
-            gsrcpad.set_active(True)
-            self.rtpdecodebin.add_pad(gsrcpad)
+        self.rtpdecodebin.add(self.rtpdecodebin.depay)
+        self.rtpdecodebin.add(self.rtpdecodebin.dec)
 
+        Gst.Element.link(self.rtpdecodebin.depay, self.rtpdecodebin.dec)
+
+        if self.media == 'video':
+            self.rtpdecodebin.videorate = Gst.ElementFactory.make('videorate', 'videorate0')
+            self.rtpdecodebin.add(self.rtpdecodebin.videorate)
+
+            self.rtpdecodebin.videoconvert = Gst.ElementFactory.make('videoconvert', 'videoconvert0')
+            self.rtpdecodebin.add(self.rtpdecodebin.videoconvert)
+
+            self.rtpdecodebin.videoscale = Gst.ElementFactory.make('videoscale', 'videoscale0')
+            self.rtpdecodebin.add(self.rtpdecodebin.videoscale)
+
+            self.rtpdecodebin.capsfilter = Gst.ElementFactory.make('capsfilter', 'capsfilter0')
+            self.rtpdecodebin.capsfilter.set_property('caps', Gst.caps_from_string('video/x-raw,framerate=30/1,format=I420,width=1280,height=720'))
+            self.rtpdecodebin.add(self.rtpdecodebin.capsfilter)
+
+            Gst.Element.link(self.rtpdecodebin.dec, self.rtpdecodebin.videorate)
+            Gst.Element.link(self.rtpdecodebin.videorate, self.rtpdecodebin.videoconvert)
+            Gst.Element.link(self.rtpdecodebin.videoconvert, self.rtpdecodebin.videoscale)
+            Gst.Element.link(self.rtpdecodebin.videoscale, self.rtpdecodebin.capsfilter)
+
+        elif self.media == 'audio':
+            self.rtpdecodebin.audiorate = Gst.ElementFactory.make('audiorate', 'audiorate0')
+            self.rtpdecodebin.add(self.rtpdecodebin.audiorate)
+
+            self.rtpdecodebin.audioconvert = Gst.ElementFactory.make('audioconvert', 'audioconvert0')
+            self.rtpdecodebin.add(self.rtpdecodebin.audioconvert)
+
+            self.rtpdecodebin.audioresample = Gst.ElementFactory.make('audioresample', 'audioresample0')
+            self.rtpdecodebin.add(self.rtpdecodebin.audioresample)
+
+            self.rtpdecodebin.capsfilter = Gst.ElementFactory.make('capsfilter', 'capsfilter0')
+            self.rtpdecodebin.capsfilter.set_property('caps', Gst.caps_from_string('audio/x-raw,format=F32LE,rate=44100,channels=2'))
+            self.rtpdecodebin.add(self.rtpdecodebin.capsfilter)
+
+            Gst.Element.link(self.rtpdecodebin.dec, self.rtpdecodebin.audiorate)
+            Gst.Element.link(self.rtpdecodebin.audiorate, self.rtpdecodebin.audioconvert)
+            Gst.Element.link(self.rtpdecodebin.audioconvert, self.rtpdecodebin.audioresample)
+            Gst.Element.link(self.rtpdecodebin.audioresample, self.rtpdecodebin.capsfilter)
+
+        self.rtpdecodebin.set_state(Gst.State.PLAYING)
+        self.rtpmixer.pipeline.add(self.rtpdecodebin)
+
+        srcpad = self.rtpdecodebin.capsfilter.get_static_pad('src')
+        gsrcpad = Gst.GhostPad.new('src', srcpad)
+        gsrcpad.set_active(True)
+        self.rtpdecodebin.add_pad(gsrcpad)
+
+        if self.media == 'video':
+            defaultsrcpad = self.rtpmixer.videosrc_capsfilter.get_static_pad('src')
+
+        elif self.media == 'audio':
+            defaultsrcpad = self.rtpmixer.audiosrc_capsfilter.get_static_pad('src')
+
+        if defaultsrcpad.is_linked():
+            sinkpad = defaultsrcpad.get_peer()
+            defaultsrcpad.set_active(False)
+            Gst.Pad.unlink(defaultsrcpad, sinkpad)
+
+        elif self.media == 'video':
             sinkpad_template = self.rtpmixer.videomixer.get_pad_template('sink_%u')
             sinkpad = self.rtpmixer.videomixer.request_pad(sinkpad_template, None, None)
 
-            Gst.Pad.link(gsrcpad, sinkpad)
+        elif self.media == 'audio':
+            sinkpad_template = self.rtpmixer.audiomixer.get_pad_template('sink_%u')
+            sinkpad = self.rtpmixer.audiomixer.request_pad(sinkpad_template, None, None)
 
-        elif self.encoding_name == 'H264':
-            pass # FIXME
-
-        elif self.encoding_name == 'OPUS':
-            pass # FIXME
+        Gst.Pad.link(gsrcpad, sinkpad)
 
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_prestart_%d' % self.session)
 
     def _link_rtpdecodebin(self, srcpad):
-        # FIXME: check if already linked and unlink before linking
-        sinkpad = self.rtpdecodebin.depay.get_static_pad('sink')
-        gsinkpad = Gst.GhostPad.new('sink', sinkpad)
-        gsinkpad.set_active(True)
-        self.rtpdecodebin.add_pad(gsinkpad)
+        gsinkpad = self.rtpdecodebin.get_static_pad('sink')
+
+        if not gsinkpad:
+            sinkpad = self.rtpdecodebin.depay.get_static_pad('sink')
+            gsinkpad = Gst.GhostPad.new('sink', sinkpad)
+            gsinkpad.set_active(True)
+            self.rtpdecodebin.add_pad(gsinkpad)
+
+        if gsinkpad.is_linked():
+            oldsrcpad = gsinkpad.get_peer()
+            Gst.Pad.unlink(oldsrcpad, gsinkpad)
 
         Gst.Pad.link(srcpad, gsinkpad)
+
+        print(self.rtpmixer.rtpbin.get_by_name('rtpjitterbuffer%d' % self.session))
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_start_%d' % self.session)
 
     def _on_ssrc_srcpad_added(self, srcpad):
@@ -309,16 +403,29 @@ if __name__ == '__main__':
     rtpmixer = RtpMixer(debug=True)
 
     rtpmixer.start()
-    rtpstream_caps = '\
+
+    videortpstream_caps = '\
         application/x-rtp,\
         media=video,\
         clock-rate=90000,\
         encoding-name=VP8,\
         payload=101'
 
-    rtpstream = rtpmixer.add_stream(
-        caps=rtpstream_caps,
+    videortpstream = rtpmixer.add_stream(
+        caps=videortpstream_caps,
         local_port=5000,
         remote_port=6000)
+
+    audiortpstream_caps = '\
+        application/x-rtp,\
+        media=audio,\
+        clock-rate=48000,\
+        encoding-name=OPUS,\
+        payload=100'
+
+    audiortpstream = rtpmixer.add_stream(
+        caps=audiortpstream_caps,
+        local_port=5002,
+        remote_port=6001)
 
     GLib.MainLoop().run()
