@@ -310,8 +310,9 @@ class RtpStream:
             self.rtpdecodebin.videoscale = Gst.ElementFactory.make('videoscale', 'videoscale0')
             self.rtpdecodebin.add(self.rtpdecodebin.videoscale)
 
+            decodecaps = Gst.caps_from_string('video/x-raw,framerate=30/1,format=I420,width=1280,height=720')
             self.rtpdecodebin.capsfilter = Gst.ElementFactory.make('capsfilter', 'capsfilter0')
-            self.rtpdecodebin.capsfilter.set_property('caps', Gst.caps_from_string('video/x-raw,framerate=30/1,format=I420,width=1280,height=720'))
+            self.rtpdecodebin.capsfilter.set_property('caps', decodecaps)
             self.rtpdecodebin.add(self.rtpdecodebin.capsfilter)
 
             Gst.Element.link(self.rtpdecodebin.dec, self.rtpdecodebin.videorate)
@@ -329,8 +330,9 @@ class RtpStream:
             self.rtpdecodebin.audioresample = Gst.ElementFactory.make('audioresample', 'audioresample0')
             self.rtpdecodebin.add(self.rtpdecodebin.audioresample)
 
+            decodecaps = Gst.caps_from_string('audio/x-raw,format=F32LE,rate=44100,channels=2')
             self.rtpdecodebin.capsfilter = Gst.ElementFactory.make('capsfilter', 'capsfilter0')
-            self.rtpdecodebin.capsfilter.set_property('caps', Gst.caps_from_string('audio/x-raw,format=F32LE,rate=44100,channels=2'))
+            self.rtpdecodebin.capsfilter.set_property('caps', decodecaps)
             self.rtpdecodebin.add(self.rtpdecodebin.capsfilter)
 
             Gst.Element.link(self.rtpdecodebin.dec, self.rtpdecodebin.audiorate)
