@@ -5,6 +5,7 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 from uuid import uuid4
+from threading import Timer
 
 def debug_graph(debug, gstbin, filename):
     if not debug: return
@@ -41,6 +42,7 @@ class RtpMixerOptions:
 class RtpMixer:
     def __init__(self, **kwargs):
         opt = RtpMixerOptions(**kwargs)
+        opt.debug and print('RtpMixer.__init__()')
 
         self.debug = opt.debug
         self.id = uuid4()
@@ -121,22 +123,27 @@ class RtpMixer:
         debug_graph(self.debug, self.pipeline, 'rtpmixer_init')
 
     def dispose(self):
+        self.debug and print('RtpMixer.dispose()', self.id)
         pass # FIXME
 
     def start(self):
+        self.debug and print('RtpMixer.start()', self.id)
         self.pipeline.set_state(Gst.State.PLAYING)
 
         debug_graph(self.debug, self.pipeline, 'rtpmixer_start')
 
     def stop(self):
+        self.debug and print('RtpMixer.stop()', self.id)
         self.pipeline.set_state(Gst.State.PAUSED)
 
         debug_graph(self.debug, self.pipeline, 'rtpmixer_stop')
 
     def add_stream(self, **kwargs):
+        self.debug and print('RtpMixer.add_stream()', self.id)
         return RtpStream(self, debug=self.debug, **kwargs)
 
     def remove_stream(self, rtpstream):
+        self.debug and print('RtpMixer.remove_stream()', self.id)
         return rtpstream.dispose()
 
     def find_stream_by_id(self, rtpstream_id):
@@ -175,6 +182,7 @@ class RtpMixer:
         raise Exception('RtpStream for session %d not found' % session)
 
     def _on_rtpbin_pad_removed(self, rtpbin, pad):
+        self.debug and print('RtpMixer._on_rtpbin_pad_removed()', pad.get_name())
         pass # FIXME
 
 class RtpStreamOptions:
@@ -215,10 +223,12 @@ class RtpStreamOptions:
 class RtpStream:
     def __init__(self, rtpmixer, **kwargs):
         opt = RtpStreamOptions(**kwargs)
+        opt.debug and print('RtpStream.__init__()')
 
         self.debug = opt.debug
         self.id = uuid4()
         self.name = 'rtpstream_%s' % self.id
+        self.disposed = False
         self.rtpmixer = rtpmixer
         self.session = rtpmixer.rtpsession_counter
         self.media = opt.media
@@ -232,8 +242,9 @@ class RtpStream:
         self.rtcpsink.set_property('async', False)
         self.rtcpsink.set_property('sync', False)
 
-        self.rtcpsink.set_state(Gst.State.PLAYING)
+        # self.rtcpsink.set_state(Gst.State.PLAYING)
         rtpmixer.pipeline.add(self.rtcpsink)
+        self.rtcpsink.sync_state_with_parent()
 
         self.rtpsrcbin = Gst.Bin('rtpsrcbin%d' % self.session)
 
@@ -256,7 +267,7 @@ class RtpStream:
         grtcpsrcpad = Gst.GhostPad('rtcp_src', rtcpsrcpad)
         self.rtpsrcbin.add_pad(grtcpsrcpad)
 
-        self.rtpsrcbin.set_state(Gst.State.PAUSED)
+        # self.rtpsrcbin.set_state(Gst.State.PAUSED)
         rtpmixer.pipeline.add(self.rtpsrcbin)
 
         rtcpsinkpad = self.rtcpsink.get_static_pad('sink')
@@ -268,16 +279,60 @@ class RtpStream:
         Gst.Pad.link(grtpsrcpad, recvrtpsinkpad)
         Gst.Pad.link(grtcpsrcpad, recvrtcpsinkpad)
 
-        self.rtpsrcbin.set_state(Gst.State.PLAYING)
+        # self.rtpsrcbin.set_state(Gst.State.PLAYING)
+        self.rtpsrcbin.sync_state_with_parent()
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_init_%d' % self.session)
 
         rtpmixer.rtpstreams[self.id] = self
         rtpmixer.rtpsession_counter += 1
 
     def dispose(self):
-        pass # FIXME
+        self.debug and print('RtpStream.dispose()', self.id)
+        if self.disposed:
+            return
+
+        if self.rtpdecodebin:
+            self.rtpdecodebin.set_state(Gst.State.NULL)
+            self.rtpmixer.pipeline.remove(self.rtpdecodebin)
+
+        self.rtpsrcbin.set_state(Gst.State.NULL)
+        self.rtpmixer.pipeline.remove(self.rtpsrcbin)
+
+        self.rtcpsink.set_state(Gst.State.NULL)
+        self.rtpmixer.pipeline.remove(self.rtcpsink)
+
+        if self.media == 'video':
+            sinkpad = self.rtpmixer.videomixer.get_static_pad('sink_0')
+
+        elif self.media == 'audio':
+            sinkpad = self.rtpmixer.audiomixer.get_static_pad('sink_0')
+
+        if not sinkpad.is_linked():
+            if self.media == 'video':
+                defaultsrcpad = self.rtpmixer.videosrc_capsfilter.get_static_pad('src')
+
+            elif self.media == 'audio':
+                defaultsrcpad = self.rtpmixer.audiosrc_capsfilter.get_static_pad('src')
+
+            Gst.Pad.link(defaultsrcpad, sinkpad)
+            defaultsrcpad.set_active(True)
+
+        if self.media == 'video':
+            self.rtpmixer.videosrc.get_static_pad('src').set_active(False)
+            self.rtpmixer.videosrc.get_static_pad('src').set_active(True)
+
+        elif self.media == 'audio':
+            self.rtpmixer.audiosrc.get_static_pad('src').set_active(False)
+            self.rtpmixer.audiosrc.get_static_pad('src').set_active(True)
+
+        self.rtpmixer = None
+        self.rtpsrcbin = None
+        self.rtpdecodebin = None
+
+        debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_dispose_%d' % self.session)
 
     def _init_rtpdecodebin(self):
+        self.debug and print('RtpStream._init_rtpdecodebin()', self.id)
         if self.rtpdecodebin:
             raise Exception('RtpStream rtpdecodebin already initialized')
 
@@ -340,8 +395,9 @@ class RtpStream:
             Gst.Element.link(self.rtpdecodebin.audioconvert, self.rtpdecodebin.audioresample)
             Gst.Element.link(self.rtpdecodebin.audioresample, self.rtpdecodebin.capsfilter)
 
-        self.rtpdecodebin.set_state(Gst.State.PLAYING)
+        # self.rtpdecodebin.set_state(Gst.State.PLAYING)
         self.rtpmixer.pipeline.add(self.rtpdecodebin)
+        self.rtpdecodebin.sync_state_with_parent()
 
         srcpad = self.rtpdecodebin.capsfilter.get_static_pad('src')
         gsrcpad = Gst.GhostPad.new('src', srcpad)
@@ -372,6 +428,7 @@ class RtpStream:
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_prestart_%d' % self.session)
 
     def _link_rtpdecodebin(self, srcpad):
+        self.debug and print('RtpStream._link_rtpdecodebin()', self.id)
         gsinkpad = self.rtpdecodebin.get_static_pad('sink')
 
         if not gsinkpad:
@@ -386,16 +443,17 @@ class RtpStream:
 
         Gst.Pad.link(srcpad, gsinkpad)
 
-        print(self.rtpmixer.rtpbin.get_by_name('rtpjitterbuffer%d' % self.session))
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_start_%d' % self.session)
 
     def _on_ssrc_srcpad_added(self, srcpad):
+        self.debug and print('RtpStream._on_ssrc_srcpad_added()', self.id)
         if not self.rtpdecodebin:
             self._init_rtpdecodebin()
 
         self._link_rtpdecodebin(srcpad)
 
-    def _on_rtpbin_ssrc_srcpad_removed(self, rtpbin, pad):
+    def _on_ssrc_srcpad_removed(self, rtpbin, pad):
+        self.debug and print('RtpStream._on_ssrc_srcpad_removed()', self.id)
         pass # FIXME
 
 if __name__ == '__main__':
@@ -403,31 +461,46 @@ if __name__ == '__main__':
     Gst.debug_set_active(True)
     Gst.debug_set_default_threshold(Gst.DebugLevel.FIXME)
     rtpmixer = RtpMixer(debug=True)
-
     rtpmixer.start()
 
-    videortpstream_caps = '\
-        application/x-rtp,\
-        media=video,\
-        clock-rate=90000,\
-        encoding-name=VP8,\
-        payload=101'
+    videortpstream = None
+    audiortpstream = None
 
-    videortpstream = rtpmixer.add_stream(
-        caps=videortpstream_caps,
-        local_port=5000,
-        remote_port=6000)
+    def add_streams():
+        global videortpstream
+        global audiortpstream
 
-    audiortpstream_caps = '\
-        application/x-rtp,\
-        media=audio,\
-        clock-rate=48000,\
-        encoding-name=OPUS,\
-        payload=100'
+        videortpstream_caps = '\
+            application/x-rtp,\
+            media=video,\
+            clock-rate=90000,\
+            encoding-name=VP8,\
+            payload=101'
 
-    audiortpstream = rtpmixer.add_stream(
-        caps=audiortpstream_caps,
-        local_port=5002,
-        remote_port=6001)
+        videortpstream = rtpmixer.add_stream(
+            caps=videortpstream_caps,
+            local_port=5000,
+            remote_port=6000)
+
+        audiortpstream_caps = '\
+            application/x-rtp,\
+            media=audio,\
+            clock-rate=48000,\
+            encoding-name=OPUS,\
+            payload=100'
+
+        audiortpstream = rtpmixer.add_stream(
+            caps=audiortpstream_caps,
+            local_port=5002,
+            remote_port=6001)
+
+    def remove_streams():
+        rtpmixer.remove_stream(videortpstream)
+        rtpmixer.remove_stream(audiortpstream)
+
+    Timer(2, add_streams).start()
+    Timer(12, remove_streams).start()
+    Timer(16, add_streams).start()
+    Timer(26, remove_streams).start()
 
     GLib.MainLoop().run()
