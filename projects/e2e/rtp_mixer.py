@@ -13,10 +13,6 @@ def debug_graph(debug, gstbin, filename):
     f.write(Gst.debug_bin_to_dot_data(gstbin, Gst.DebugGraphDetails.ALL))
     f.close()
 
-def parse_capability(caps, capability):
-    match = re.search(re.escape(capability) + r'=(?:\([^\)]+\))?([^,]+)', caps)
-    return match.group(1).strip() if match else None
-
 def get_video_codecs():
     return ['VP8', 'H264']
 
