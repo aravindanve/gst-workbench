@@ -31,13 +31,13 @@ class UnsupportedException(Exception):
 
 class RtpMixerOptions:
     def __init__(self, **kwargs):
-        self.debug = kwargs.get('debug', False) # FIXME: change to debug_graph
-        # self.preview = kwargs.get('debug_preview', False)
-        self.videosrc_pattern = kwargs.get('videosrc_pattern', 'snow')
-        self.videosrc_caps = kwargs.get('videosrc_caps', 'video/x-raw,format=I420,framerate=30/1,width=1280,height=720')
-        self.audiosrc_wave = kwargs.get('audiosrc_wave', 'sine')
-        self.audiosrc_caps = kwargs.get('audiosrc_caps', 'audio/x-raw,format=F32LE,rate=44100,channels=1,layout=interleaved')
-        self.videomixer_background = kwargs.get('videomixer_background', 'black')
+        self.debug = kwargs.get('debug', False)
+        self.default_pattern = kwargs.get('default_pattern') or 'snow'
+        self.default_wave = kwargs.get('default_wave') or 'sine'
+        self.background = kwargs.get('background') or 'black'
+        self.width = kwargs.get('width') or 1280
+        self.height = kwargs.get('height') or 720
+        self.framerate = kwargs.get('framerate') or '30/1'
 
 class RtpMixer:
     def __init__(self, **kwargs):
@@ -50,6 +50,9 @@ class RtpMixer:
         self.disposed = False
         self.rtpsession_counter = 0
         self.rtpstreams = {}
+        self.framerate = opt.framerate
+        self.width = opt.width
+        self.height = opt.height
 
         self.pipeline = Gst.Pipeline(self.name)
 
@@ -60,25 +63,36 @@ class RtpMixer:
 
         self.videosrc = Gst.ElementFactory.make('videotestsrc', 'videosrc0')
         self.videosrc.set_property('is-live', True)
-        self.videosrc.set_property('pattern', opt.videosrc_pattern)
+        self.videosrc.set_property('pattern', opt.default_pattern)
         self.pipeline.add(self.videosrc)
 
+        self.videocaps = Gst.caps_from_string(
+            'video/x-raw,format=I420,framerate=%s,width=%d,height=%d' % (
+            opt.framerate, opt.width, opt.height))
+
         self.videosrc_capsfilter = Gst.ElementFactory.make('capsfilter', 'videosrc_capsfilter0')
-        self.videosrc_capsfilter.set_property('caps', Gst.caps_from_string(opt.videosrc_caps))
+        self.videosrc_capsfilter.set_property('caps', self.videocaps)
         self.pipeline.add(self.videosrc_capsfilter)
 
         self.audiosrc = Gst.ElementFactory.make('audiotestsrc', 'audiosrc0')
         self.audiosrc.set_property('is-live', True)
-        self.audiosrc.set_property('wave', opt.audiosrc_wave)
+        self.audiosrc.set_property('wave', opt.default_wave)
         self.pipeline.add(self.audiosrc)
 
+        self.audiocaps = Gst.caps_from_string(
+            'audio/x-raw,format=F32LE,rate=44100,channels=2,layout=interleaved')
+
         self.audiosrc_capsfilter = Gst.ElementFactory.make('capsfilter', 'audiosrc_capsfilter0')
-        self.audiosrc_capsfilter.set_property('caps', Gst.caps_from_string(opt.audiosrc_caps))
+        self.audiosrc_capsfilter.set_property('caps', self.audiocaps)
         self.pipeline.add(self.audiosrc_capsfilter)
 
         self.videomixer = Gst.ElementFactory.make('videomixer', 'videomixer0')
-        self.videomixer.set_property('background', opt.videomixer_background)
+        self.videomixer.set_property('background', opt.background)
         self.pipeline.add(self.videomixer)
+
+        self.videomixer_capsfilter = Gst.ElementFactory.make('capsfilter', 'videomixer_capsfilter0')
+        self.videomixer_capsfilter.set_property('caps', self.videocaps)
+        self.pipeline.add(self.videomixer_capsfilter)
 
         self.audiomixer = Gst.ElementFactory.make('audiomixer', 'audiomixer0')
         self.pipeline.add(self.audiomixer)
@@ -94,12 +108,15 @@ class RtpMixer:
         self.audiosink = Gst.ElementFactory.make('autoaudiosink', 'audiosink0')
         self.pipeline.add(self.audiosink)
 
+        videomixer_capsfilter_srcpad = self.videomixer_capsfilter.get_static_pad('src')
+        videomixer_capsfilter_sinkpad = self.videomixer_capsfilter.get_static_pad('sink')
         videomixer_srcpad = self.videomixer.get_static_pad('src')
         videoqueue_sinkpad = self.multiq.get_request_pad('sink_0')
         videoqueue_srcpad = self.multiq.get_static_pad('src_0')
         videosink_sinkpad = self.videosink.get_static_pad('sink')
 
-        Gst.Pad.link(videomixer_srcpad, videoqueue_sinkpad)
+        Gst.Pad.link(videomixer_srcpad, videomixer_capsfilter_sinkpad)
+        Gst.Pad.link(videomixer_capsfilter_srcpad, videoqueue_sinkpad)
         Gst.Pad.link(videoqueue_srcpad, videosink_sinkpad)
         Gst.Element.link(self.videosrc_capsfilter, self.videomixer)
         Gst.Element.link(self.videosrc, self.videosrc_capsfilter)
@@ -188,24 +205,32 @@ class RtpMixer:
 class RtpStreamOptions:
     def __init__(self, **kwargs):
         self.debug = kwargs.get('debug', False)
-        self.caps = kwargs.get('caps', None)
-        self.local_ip = kwargs.get('local_ip', '127.0.0.1')
-        self.local_port = kwargs.get('local_port', None)
-        self.remote_ip = kwargs.get('remote_ip', '127.0.0.1')
-        self.remote_port = kwargs.get('remote_port', None)
+        self.media = kwargs.get('media')
+        self.clock_rate = kwargs.get('clock_rate')
+        self.encoding_name = kwargs.get('encoding_name')
+        self.payload = kwargs.get('payload')
+        self.local_ip = kwargs.get('local_ip') or '127.0.0.1'
+        self.local_port = kwargs.get('local_port')
+        self.remote_ip = kwargs.get('remote_ip') or '127.0.0.1'
+        self.remote_port = kwargs.get('remote_port')
 
-        if not self.caps:
-            raise RequiredOptionException('caps is required')
+        if not self.media:
+            raise RequiredOptionException('media is required')
+
+        if not self.clock_rate:
+            raise RequiredOptionException('clock_rate is required')
+
+        if not self.encoding_name:
+            raise RequiredOptionException('encoding_name is required')
+
+        if not self.payload:
+            raise RequiredOptionException('payload is required')
 
         if not self.local_port:
             raise RequiredOptionException('local_port is required')
 
         if not self.remote_port:
             raise RequiredOptionException('remote_port is required')
-
-        self.media = parse_capability(self.caps, 'media')
-        self.payload = parse_capability(self.caps, 'payload')
-        self.encoding_name = parse_capability(self.caps, 'encoding-name')
 
         if not self.media in ['video', 'audio']:
             raise UnsupportedException('Unsupported media: %s' % self.media)
@@ -232,8 +257,9 @@ class RtpStream:
         self.rtpmixer = rtpmixer
         self.session = rtpmixer.rtpsession_counter
         self.media = opt.media
-        self.payload = opt.payload
+        self.clock_rate = opt.clock_rate
         self.encoding_name = opt.encoding_name
+        self.payload = opt.payload
         self.rtpdecodebin = None
 
         self.rtcpsink = Gst.ElementFactory.make('udpsink', 'rtcpsink%d' % self.session)
@@ -248,10 +274,14 @@ class RtpStream:
 
         self.rtpsrcbin = Gst.Bin('rtpsrcbin%d' % self.session)
 
+        self.caps = Gst.caps_from_string(
+            'application/x-rtp,media=%s,clock-rate=%d,encoding-name=%s,payload=%d' % (
+            opt.media, opt.clock_rate, opt.encoding_name, opt.payload))
+
         self.rtpsrcbin.rtpsrc = Gst.ElementFactory.make('udpsrc', 'rtpsrc0')
         self.rtpsrcbin.rtpsrc.set_property('port', opt.local_port)
         self.rtpsrcbin.rtpsrc.set_property('address', opt.local_ip)
-        self.rtpsrcbin.rtpsrc.set_property('caps', Gst.caps_from_string(opt.caps))
+        self.rtpsrcbin.rtpsrc.set_property('caps', self.caps)
         self.rtpsrcbin.add(self.rtpsrcbin.rtpsrc)
 
         self.rtpsrcbin.rtcpsrc = Gst.ElementFactory.make('udpsrc', 'rtcpsrc0')
@@ -470,27 +500,19 @@ if __name__ == '__main__':
         global videortpstream
         global audiortpstream
 
-        videortpstream_caps = '\
-            application/x-rtp,\
-            media=video,\
-            clock-rate=90000,\
-            encoding-name=VP8,\
-            payload=101'
-
         videortpstream = rtpmixer.add_stream(
-            caps=videortpstream_caps,
+            media='video',
+            clock_rate=90000,
+            encoding_name='VP8',
+            payload=101,
             local_port=5000,
             remote_port=6000)
 
-        audiortpstream_caps = '\
-            application/x-rtp,\
-            media=audio,\
-            clock-rate=48000,\
-            encoding-name=OPUS,\
-            payload=100'
-
         audiortpstream = rtpmixer.add_stream(
-            caps=audiortpstream_caps,
+            media='audio',
+            clock_rate=48000,
+            encoding_name='OPUS',
+            payload=100,
             local_port=5002,
             remote_port=6001)
 
