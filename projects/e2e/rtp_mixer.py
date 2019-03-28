@@ -46,6 +46,8 @@ class RtpMixer:
         self.disposed = False
         self.rtpsession_counter = 0
         self.rtpstreams = {}
+        self.videortpstreams = {}
+        self.audiortpstreams = {}
         self.framerate = opt.framerate
         self.width = opt.width
         self.height = opt.height
@@ -153,15 +155,68 @@ class RtpMixer:
 
     def add_stream(self, **kwargs):
         self.debug and print('RtpMixer.add_stream()', self.id)
-        return RtpStream(self, debug=self.debug, **kwargs)
+        rtpstream = RtpStream(self, debug=self.debug, **kwargs)
+        return rtpstream
 
     def remove_stream(self, rtpstream):
         self.debug and print('RtpMixer.remove_stream()', self.id)
-        return rtpstream.dispose()
+        rtpstream.dispose()
+
+    def get_streams(self):
+        return self.rtpstreams.values()
+
+    def get_video_streams(self):
+        return self.videortpstreams.values()
+
+    def get_audio_streams(self):
+        return self.audiortpstreams.values()
 
     def find_stream_by_id(self, rtpstream_id):
         if rtpstream_id in self.rtpstreams:
             return self.rtpstreams[rtpstream_id]
+
+    def _resize_video_streams(self):
+        if len(self.videortpstreams) <= 1:
+            decodewidth = self.width
+            decodeheight = self.height
+
+            for sinkpad in self.videomixer.sinkpads:
+                if not sinkpad.is_linked():
+                    continue
+
+        else:
+            decodewidth = self.width / 2
+            decodeheight = self.height / 2
+
+        caps = Gst.caps_from_string(
+            'video/x-raw,framerate=%s,format=I420,width=%d,height=%d' % (
+            self.framerate, decodewidth, decodeheight))
+
+        num = 0
+        for sinkpad in self.videomixer.sinkpads:
+            if not sinkpad.is_linked():
+                continue
+
+            peer = sinkpad.get_peer()
+
+            if hasattr(peer, 'get_target'):
+                capsfilter = peer.get_target().get_parent_element()
+            else:
+                capsfilter = peer.get_parent_element()
+
+            capsfilter.set_property('caps', caps)
+
+            if num == 0 or num == 2:
+                sinkpad.set_property('xpos', 0)
+            elif num == 1 or num == 3:
+                sinkpad.set_property('xpos', decodewidth)
+
+            if num == 0 or num == 1:
+                sinkpad.set_property('ypos', 0)
+            elif num == 2 or num == 3:
+                sinkpad.set_property('ypos', decodeheight)
+
+            num += 1
 
     def _on_bus_message(self, bus, message):
         if message.type == Gst.MessageType.QOS:
@@ -258,6 +313,11 @@ class RtpStream:
         self.payload = opt.payload
         self.rtpdecodebin = None
 
+        if opt.media == 'video' and len(rtpmixer.videortpstreams) >= 4:
+            raise UnsupportedException('Maximum of 4 video streams supported')
+        elif opt.media == 'audio' and len(rtpmixer.audiortpstreams) >= 6:
+            raise UnsupportedException('Maximum of 6 audio streams supported')
+
         self.rtcpsink = Gst.ElementFactory.make('udpsink', 'rtcpsink%d' % self.session)
         self.rtcpsink.set_property('port', opt.remote_port)
         self.rtcpsink.set_property('host', opt.remote_ip)
@@ -309,8 +369,12 @@ class RtpStream:
         self.rtpsrcbin.sync_state_with_parent()
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_init_%d' % self.session)
 
-        rtpmixer.rtpstreams[self.id] = self
         rtpmixer.rtpsession_counter += 1
+        rtpmixer.rtpstreams[self.id] = self
+        if self.media == 'video':
+            rtpmixer.videortpstreams[self.id] = self
+        elif self.media == 'audio':
+            rtpmixer.audiortpstreams[self.id] = self
 
     def dispose(self):
         self.debug and print('RtpStream.dispose()', self.id)
@@ -352,6 +416,14 @@ class RtpStream:
             self.rtpmixer.audiosrc.get_static_pad('src').set_active(True)
 
         self.rtpmixer.rtpstreams.pop(self.id, None)
+
+        if self.media == 'video':
+            self.rtpmixer.videortpstreams.pop(self.id, None)
+            self.rtpmixer._resize_video_streams()
+
+        elif self.media == 'audio':
+            self.rtpmixer.audiortpstreams.pop(self.id, None)
+
         self.rtpmixer = None
         self.rtpsrcbin = None
         self.rtpdecodebin = None
@@ -392,7 +464,18 @@ class RtpStream:
             self.rtpdecodebin.videoscale = Gst.ElementFactory.make('videoscale', 'videoscale0')
             self.rtpdecodebin.add(self.rtpdecodebin.videoscale)
 
-            decodecaps = Gst.caps_from_string('video/x-raw,framerate=30/1,format=I420,width=1280,height=720')
+            if len(self.rtpmixer.videortpstreams) <= 1:
+                decodewidth = self.rtpmixer.width
+                decodeheight = self.rtpmixer.height
+
+            else:
+                decodewidth = self.rtpmixer.width / 2
+                decodeheight = self.rtpmixer.height / 2
+
+            decodecaps = Gst.caps_from_string(
+                'video/x-raw,framerate=%s,format=I420,width=%d,height=%d' % (
+                self.rtpmixer.framerate, decodewidth, decodeheight))
+
             self.rtpdecodebin.capsfilter = Gst.ElementFactory.make('capsfilter', 'capsfilter0')
             self.rtpdecodebin.capsfilter.set_property('caps', decodecaps)
             self.rtpdecodebin.add(self.rtpdecodebin.capsfilter)
@@ -449,8 +532,15 @@ class RtpStream:
             Gst.Pad.unlink(defaultsrcpad, sinkpad)
 
         elif self.media == 'video':
-            sinkpad_template = self.rtpmixer.videomixer.get_pad_template('sink_%u')
-            sinkpad = self.rtpmixer.videomixer.request_pad(sinkpad_template, None, None)
+            sinkpad = None
+            for mixersinkpad in self.rtpmixer.videomixer.sinkpads:
+                if not mixersinkpad.is_linked():
+                    sinkpad = mixersinkpad
+                    break
+
+            if not sinkpad:
+                sinkpad_template = self.rtpmixer.videomixer.get_pad_template('sink_%u')
+                sinkpad = self.rtpmixer.videomixer.request_pad(sinkpad_template, None, None)
 
         elif self.media == 'audio':
             sinkpad_template = self.rtpmixer.audiomixer.get_pad_template('sink_%u')
@@ -476,6 +566,9 @@ class RtpStream:
 
         Gst.Pad.link(srcpad, gsinkpad)
 
+        if self.media == 'video':
+            self.rtpmixer._resize_video_streams()
+
         debug_graph(self.debug, rtpmixer.pipeline, 'rtpstream_start_%d' % self.session)
 
     def _on_ssrc_srcpad_added(self, srcpad):
@@ -500,14 +593,16 @@ if __name__ == '__main__':
 
     rtpmixer.start()
 
-    videortpstream = None
-    audiortpstream = None
+    videortpstream0 = None
+    audiortpstream0 = None
+    videortpstream1 = None
+    audiortpstream1 = None
 
-    def add_streams():
-        global videortpstream
-        global audiortpstream
+    def add_streams0():
+        global videortpstream0
+        global audiortpstream0
 
-        videortpstream = rtpmixer.add_stream(
+        videortpstream0 = rtpmixer.add_stream(
             media='video',
             clock_rate=90000,
             encoding_name='VP8',
@@ -515,7 +610,7 @@ if __name__ == '__main__':
             local_port=5000,
             remote_port=6000)
 
-        audiortpstream = rtpmixer.add_stream(
+        audiortpstream0 = rtpmixer.add_stream(
             media='audio',
             clock_rate=48000,
             encoding_name='OPUS',
@@ -523,13 +618,51 @@ if __name__ == '__main__':
             local_port=5002,
             remote_port=6001)
 
-    def remove_streams():
-        rtpmixer.remove_stream(videortpstream)
-        rtpmixer.remove_stream(audiortpstream)
+    def remove_streams0():
+        global videortpstream0
+        global audiortpstream0
 
-    Timer(2, add_streams).start()
-    Timer(12, remove_streams).start()
-    Timer(16, add_streams).start()
-    Timer(26, remove_streams).start()
+        rtpmixer.remove_stream(videortpstream0)
+        rtpmixer.remove_stream(audiortpstream0)
+        videortpstream0 = None
+        audiortpstream0 = None
+
+    def add_streams1():
+        global videortpstream1
+        global audiortpstream1
+
+        videortpstream1 = rtpmixer.add_stream(
+            media='video',
+            clock_rate=90000,
+            encoding_name='VP8',
+            payload=101,
+            local_port=5100,
+            remote_port=6100)
+
+        audiortpstream1 = rtpmixer.add_stream(
+            media='audio',
+            clock_rate=48000,
+            encoding_name='OPUS',
+            payload=100,
+            local_port=5102,
+            remote_port=6101)
+
+    def remove_streams1():
+        global videortpstream1
+        global audiortpstream1
+
+        rtpmixer.remove_stream(videortpstream1)
+        rtpmixer.remove_stream(audiortpstream1)
+        videortpstream1 = None
+        audiortpstream1 = None
+
+    Timer(10, add_streams0).start()
+    Timer(20, remove_streams0).start()
+    Timer(30, add_streams1).start()
+    Timer(40, remove_streams1).start()
+    Timer(50, add_streams0).start()
+    Timer(60, add_streams1).start() # FIXME: concurrency problem if two methods called back to back
+    Timer(70, remove_streams0).start()
+    Timer(80, remove_streams1).start() # FIXME: concurrency problem if two methods called back to back
 
     GLib.MainLoop().run()
