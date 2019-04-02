@@ -32,6 +32,8 @@ def do_mixer_init(**kwargs):
     mixer.video_streams = {}
     mixer.audio_streams = {}
 
+    mixer.last_resize_video_streams_count = 0
+
     mixer.pipeline = Gst.Pipeline('mixer')
 
     mixer.video_format = kwargs.get('video_format') or 'I420'
@@ -68,9 +70,11 @@ def do_mixer_init(**kwargs):
     mixer.videosrc.link(mixer.videosrc_capsfilter)
 
     default_wave = kwargs.get('default_wave') or 'silence'
+    default_volume = kwargs.get('default_volume') or 0.02
     mixer.audiosrc = Gst.ElementFactory.make('audiotestsrc', 'audiosrc')
     mixer.audiosrc.set_property('is-live', True)
     mixer.audiosrc.set_property('wave', default_wave)
+    mixer.audiosrc.set_property('volume', default_volume)
     mixer.pipeline.add(mixer.audiosrc)
 
     mixer.audiosrc_capsfilter = Gst.ElementFactory.make('capsfilter', 'audiosrc_capsfilter')
@@ -119,7 +123,7 @@ def do_mixer_init(**kwargs):
     audiomixer_capsfilter_srcpad.link(multiqueue_sinkpad_1)
 
     # FIXME: replace autovideosink with rtpsink
-    mixer.videosink = Gst.ElementFactory.make('autovideosink', 'videosink0')
+    mixer.videosink = Gst.ElementFactory.make('autovideosink', 'videosink')
     mixer.pipeline.add(mixer.videosink)
 
     multiqueue_srcpad_0 = mixer.multiqueue.get_static_pad('src_0')
@@ -127,7 +131,7 @@ def do_mixer_init(**kwargs):
     multiqueue_srcpad_0.link(videosink_sinkpad)
 
     # FIXME: replace autoaudiosink with rtpsink
-    mixer.audiosink = Gst.ElementFactory.make('autoaudiosink', 'audiosink0')
+    mixer.audiosink = Gst.ElementFactory.make('autoaudiosink', 'audiosink')
     mixer.pipeline.add(mixer.audiosink)
 
     multiqueue_srcpad_1 = mixer.multiqueue.get_static_pad('src_1')
@@ -138,6 +142,8 @@ def do_mixer_init(**kwargs):
     mixer.recv_rtpbin.connect('pad-added', _on_mixer_recv_rtpbin_pad_removed, mixer)
 
     mixer.pipeline.set_state(Gst.State.PAUSED)
+
+    _do_mtunsafe_resize_video_streams(mixer)
 
     mixer.debug and debug_graph(mixer.pipeline, 'debug_mixer_init')
 
@@ -155,6 +161,7 @@ def do_mixer_stop(mixer):
 
 def do_mixer_dispose(mixer):
     mixer.pipeline.set_state(Gst.State.NULL)
+    mixer.disposed = True
 
 def do_mixer_stream_init(mixer, **kwargs):
     stream = Stream()
@@ -162,7 +169,6 @@ def do_mixer_stream_init(mixer, **kwargs):
     stream.debug = kwargs.get('debug', mixer.debug)
 
     stream.disposed = False
-    stream.lock = Lock()
 
     stream.media = kwargs.get('media') or 'video'
     stream.clock_rate = kwargs.get('clock_rate') or 90000
@@ -326,14 +332,42 @@ def do_mixer_stream_init(mixer, **kwargs):
 
     stream.rtpsrcbin.sync_state_with_parent()
 
-    mixer.debug and debug_graph(mixer.pipeline, 'debug_mixer_stream_%s_init' % stream.session)
+    stream.debug and debug_graph(mixer.pipeline, 'debug_mixer_stream_%s_init' % stream.session)
+
+    return stream
 
 def do_mixer_stream_dispose(mixer, stream):
     with mixer.lock:
-        # unlink stream
-        # remove stream from mixer
-        pass
-    # dispose stream
+        _do_mtunsafe_unlink_rtpbin_from_rtpdecodebin(stream)
+        _do_mtunsafe_unlink_rtpdecodebin_from_avmixer(mixer, stream)
+
+        if stream.media == 'video':
+            _do_mtunsafe_resize_video_streams(mixer)
+
+        if stream.media == 'video':
+            mixer.streams.pop(mixer.session_count, None)
+            mixer.video_streams.pop(mixer.session_count, None)
+
+        elif stream.media == 'audio':
+            mixer.streams.pop(mixer.session_count, None)
+            mixer.audio_streams.pop(mixer.session_count, None)
+
+    stream.rtpsrcbin.set_state(Gst.State.NULL)
+    mixer.pipeline.remove(stream.rtpsrcbin)
+
+    stream.rtpdecodebin.set_state(Gst.State.NULL)
+    mixer.pipeline.remove(stream.rtpdecodebin)
+
+    stream.rtcpsink.set_state(Gst.State.NULL)
+    mixer.pipeline.remove(stream.rtcpsink)
+
+    stream.caps = None
+    stream.rtpsrcbin = None
+    stream.rtpdecodebin = None
+    stream.rtcpsink = None
+    stream.disposed = True
+
+    stream.debug and debug_graph(mixer.pipeline, 'debug_mixer_stream_%s_dispose' % stream.session)
 
 def _do_mtunsafe_link_rtpbin_to_rtpdecodebin(stream, rtpbin_srcpad):
     rtpdecodebin_sinkpad = stream.rtpdecodebin.get_static_pad('sink')
@@ -344,6 +378,14 @@ def _do_mtunsafe_link_rtpbin_to_rtpdecodebin(stream, rtpbin_srcpad):
         peerpad.unlink(rtpdecodebin_sinkpad)
 
     rtpbin_srcpad.link(rtpdecodebin_sinkpad)
+
+def _do_mtunsafe_unlink_rtpbin_from_rtpdecodebin(stream):
+    rtpdecodebin_sinkpad = stream.rtpdecodebin.get_static_pad('sink')
+
+    if rtpdecodebin_sinkpad.is_linked():
+        peerpad = rtpdecodebin_sinkpad.get_peer()
+        peerpad.set_active(False)
+        peerpad.unlink(rtpdecodebin_sinkpad)
 
 def _do_mtunsafe_link_rtpdecodebin_to_avmixer(mixer, stream):
     rtpdecodebin_srcpad = stream.rtpdecodebin.get_static_pad('src')
@@ -381,6 +423,86 @@ def _do_mtunsafe_link_rtpdecodebin_to_avmixer(mixer, stream):
 
             rtpdecodebin_srcpad.link(audiomixer_sinkpad)
 
+def _do_mtunsafe_unlink_rtpdecodebin_from_avmixer(mixer, stream):
+    rtpdecodebin_srcpad = stream.rtpdecodebin.get_static_pad('src')
+
+    if rtpdecodebin_srcpad.is_linked():
+        avmixer_sinkpad = rtpdecodebin_srcpad.get_peer()
+        avmixer = avmixer_sinkpad.get_parent_element()
+        avmixer_sinkpad.set_active(False)
+        rtpdecodebin_srcpad.unlink(avmixer_sinkpad)
+
+        if stream.media == 'video':
+            if len(avmixer.sinkpads) > 1:
+                avmixer.remove_pad(avmixer_sinkpad)
+
+            else:
+                videosrc_srcpad = mixer.videosrc.get_static_pad('src')
+                videosrc_capsfilter_srcpad = mixer.videosrc_capsfilter.get_static_pad('src')
+                videosrc_capsfilter_srcpad.link(avmixer_sinkpad)
+                mixer.videosrc.set_locked_state(False)
+                videosrc_srcpad.set_active(True)
+                mixer.videosrc.sync_state_with_parent()
+                mixer.videosrc_capsfilter.sync_state_with_parent()
+                avmixer_sinkpad.set_active(True)
+                avmixer.sync_state_with_parent()
+
+        elif stream.media == 'audio':
+            avmixer.remove_pad(avmixer_sinkpad)
+
+            if not len(avmixer.sinkpads):
+                audiosrc_srcpad = mixer.audiosrc.get_static_pad('src')
+                audiosrc_capsfilter_srcpad = mixer.audiosrc_capsfilter.get_static_pad('src')
+                audiomixer_sinkpad = mixer.audiomixer.get_request_pad('sink_0')
+                audiosrc_capsfilter_srcpad.link(audiomixer_sinkpad)
+                mixer.audiosrc.set_locked_state(False)
+                audiosrc_srcpad.set_active(True)
+                mixer.audiosrc.sync_state_with_parent()
+                mixer.audiosrc_capsfilter.sync_state_with_parent()
+
+def _do_mtunsafe_resize_video_streams(mixer):
+    video_streams_count = len(mixer.videomixer.sinkpads)
+    if mixer.last_resize_video_streams_count != video_streams_count:
+        if video_streams_count > 1:
+            width = mixer.video_width / 2
+            height = mixer.video_height / 2
+
+        else:
+            width = mixer.video_width
+            height = mixer.video_height
+
+        caps = Gst.caps_from_string(
+            'video/x-raw,format=%s,framerate=%s,width=%s,height=%s' % (
+                mixer.video_format, mixer.video_framerate, width, height))
+
+        index = 0
+        for sinkpad in mixer.videomixer.sinkpads:
+            peerpad = sinkpad.get_peer()
+
+            if not peerpad:
+                continue
+
+            if hasattr(peerpad, 'get_target'):
+                capsfilter = peerpad.get_target().get_parent_element()
+            else:
+                capsfilter = peerpad.get_parent_element()
+
+            capsfilter.set_property('caps', caps)
+
+            if index == 0 or index == 2:
+                sinkpad.set_property('xpos', 0)
+            elif index == 1 or index == 3:
+                sinkpad.set_property('xpos', width)
+
+            if index == 0 or index == 1:
+                sinkpad.set_property('ypos', 0)
+            elif index == 2 or index == 3:
+                sinkpad.set_property('ypos', height)
+
+            index += 1
+
+        mixer.last_resize_video_streams_count = index + 1
+
 def _on_mixer_recv_rtpbin_pad_added(rtpbin, srcpad, mixer):
     name_args = srcpad.get_name().split('_')
     if len(name_args) != 6: return
@@ -397,13 +519,16 @@ def _on_mixer_recv_rtpbin_pad_added(rtpbin, srcpad, mixer):
         stream = mixer.streams[session]
 
         if not stream:
-            print('NOT_FOUND: stream %s not found', session)
+            print('ERROR: stream %s not found', session)
             return
 
         _do_mtunsafe_link_rtpbin_to_rtpdecodebin(stream, srcpad)
         _do_mtunsafe_link_rtpdecodebin_to_avmixer(mixer, stream)
 
-    mixer.debug and debug_graph(mixer.pipeline, 'debug_mixer_stream_%s_start' % session)
+        if stream.media == 'video':
+            _do_mtunsafe_resize_video_streams(mixer)
+
+    stream.debug and debug_graph(mixer.pipeline, 'debug_mixer_stream_%s_start' % session)
 
 def _on_mixer_recv_rtpbin_pad_removed(rtpbin, srcpad, mixer):
     name_args = srcpad.get_name().split('_')
@@ -423,23 +548,95 @@ if __name__ == '__main__':
     Gst.init(None)
     Gst.debug_set_active(True)
     Gst.debug_set_default_threshold(Gst.DebugLevel.FIXME)
-    mixer = do_mixer_init(debug=True, default_pattern='snow', default_wave='sine')
+    mixer = do_mixer_init(debug=True, default_pattern='snow', default_wave='red-noise')
+
+    stream_0 = None
+    stream_1 = None
+    stream_2 = None
+    stream_3 = None
+
+    def do_mixer_stream_init_0():
+        global mixer
+        global stream_0
+
+        stream_0 = do_mixer_stream_init(mixer,
+            media='video',
+            clock_rate=90000,
+            encoding_name='VP8',
+            payload=101,
+            local_port=5000,
+            remote_port=6000)
+
+    def do_mixer_stream_dispose_0():
+        global mixer
+        global stream_0
+
+        # Gst.debug_set_default_threshold(Gst.DebugLevel.INFO)
+        print('stream_0', stream_0)
+        do_mixer_stream_dispose(mixer, stream_0)
+
+    def do_mixer_stream_init_1():
+        global mixer
+        global stream_1
+
+        stream_1 = do_mixer_stream_init(mixer,
+            media='audio',
+            clock_rate=48000,
+            encoding_name='OPUS',
+            payload=100,
+            local_port=5002,
+            remote_port=6001)
+
+    def do_mixer_stream_dispose_1():
+        global mixer
+        global stream_1
+
+        print('stream_1', stream_1)
+        do_mixer_stream_dispose(mixer, stream_1)
+
+    def do_mixer_stream_init_2():
+        global mixer
+        global stream_2
+
+        stream_2 = do_mixer_stream_init(mixer,
+            media='video',
+            clock_rate=90000,
+            encoding_name='VP8',
+            payload=101,
+            local_port=5000,
+            remote_port=6000)
+
+    def do_mixer_stream_dispose_2():
+        global mixer
+        global stream_2
+
+        print('stream_2', stream_2)
+        do_mixer_stream_dispose(mixer, stream_2)
+
+    def do_mixer_stream_init_3():
+        global mixer
+        global stream_3
+
+        stream_3 = do_mixer_stream_init(mixer,
+            media='audio',
+            clock_rate=48000,
+            encoding_name='OPUS',
+            payload=100,
+            local_port=5002,
+            remote_port=6001)
+
+    def do_mixer_stream_dispose_3():
+        global mixer
+        global stream_3
+
+        print('stream_3', stream_3)
+        do_mixer_stream_dispose(mixer, stream_3)
 
     Timer(0, do_mixer_start, args=[mixer]).start()
-    Timer(2, do_mixer_stream_init, args=[mixer], kwargs={
-        'media': 'video',
-        'clock_rate': 90000,
-        'encoding_name': 'VP8',
-        'payload': 101,
-        'local_port': 5000,
-        'remote_port': 6000 }).start()
-
-    Timer(2, do_mixer_stream_init, args=[mixer], kwargs={
-        'media': 'audio',
-        'clock_rate': 48000,
-        'encoding_name': 'OPUS',
-        'payload': 100,
-        'local_port': 5002,
-        'remote_port': 6001 }).start()
+    Timer(2, do_mixer_stream_init_0).start()
+    Timer(2, do_mixer_stream_init_1).start()
+    Timer(10, do_mixer_stream_dispose_0).start()
+    Timer(10, do_mixer_stream_dispose_1).start()
+    Timer(15, debug_graph, args=[mixer.pipeline, 'debug_final']).start()
 
     GLib.MainLoop().run()
