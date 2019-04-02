@@ -53,7 +53,7 @@ def do_mixer_init(**kwargs):
             mixer.audio_format, mixer.audio_rate, mixer.audio_channels, mixer.audio_layout))
 
     mixer.recv_rtpbin = Gst.ElementFactory.make('rtpbin', 'recv_rtpbin')
-    mixer.recv_rtpbin.set_property('autoremove', True)
+    mixer.recv_rtpbin.set_property('autoremove', True) # FIXME: gc not running? only pads are removed
     mixer.recv_rtpbin.set_property('drop-on-latency', True)
     mixer.pipeline.add(mixer.recv_rtpbin)
 
@@ -549,7 +549,6 @@ def _do_mtunsafe_resize_streams(mixer):
             peerpad = sinkpad.get_peer()
             peerelement = peerpad.get_parent_element()
 
-            print('............................................................', peerelement, hasattr(peerelement, 'capsfilter'))
             if hasattr(peerelement, 'capsfilter'):
                 capsfilter = peerelement.capsfilter
             else:
@@ -577,31 +576,96 @@ if __name__ == '__main__':
     Gst.debug_set_default_threshold(Gst.DebugLevel.FIXME)
 
     loop = GLib.MainLoop()
+    refs = {}
 
-    mixer = do_mixer_init(
-        debug=True,
-        default_pattern='snow',
-        default_wave='red-noise')
+    def do_action(name, action, *ref_names, **kwargs):
+        global refs
 
-    stream_0 = do_mixer_stream_init(mixer,
-        media='video',
-        clock_rate=90000,
-        encoding_name='VP8',
-        payload=101,
-        local_port=5000,
-        remote_port=6000)
+        args = [refs[ref_name] for ref_name in ref_names]
+        refs[name] = action(*args, **kwargs)
 
-    stream_1 = do_mixer_stream_init(mixer,
-        media='video',
-        clock_rate=90000,
-        encoding_name='VP8',
-        payload=101,
-        local_port=5100,
-        remote_port=6100)
+    Timer(0, do_action, args=['mixer', do_mixer_init], kwargs={
+        'debug': True,
+        'default_pattern': 'snow',
+        'default_wave': 'red-noise' }).start()
 
-    do_mixer_start(mixer)
+    Timer(2, do_action, args=[None, do_mixer_start, 'mixer']).start()
 
-    Timer(20, do_mixer_stream_dispose, args=[mixer, stream_0]).start()
-    Timer(30, do_mixer_stream_dispose, args=[mixer, stream_1]).start()
+    Timer(4, do_action, args=['stream_0', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'video',
+        'clock_rate': 90000,
+        'encoding_name': 'VP8',
+        'payload': 101,
+        'local_port': 5000,
+        'remote_port': 6000 }).start()
+
+    Timer(4, do_action, args=['stream_1', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'audio',
+        'clock_rate': 48000,
+        'encoding_name': 'OPUS',
+        'payload': 100,
+        'local_port': 5002,
+        'remote_port': 6001 }).start()
+
+    Timer(10, do_action, args=['stream_0', do_mixer_stream_dispose, 'mixer', 'stream_0']).start()
+    Timer(10, do_action, args=['stream_1', do_mixer_stream_dispose, 'mixer', 'stream_1']).start()
+
+    Timer(15, do_action, args=['stream_2', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'video',
+        'clock_rate': 90000,
+        'encoding_name': 'VP8',
+        'payload': 101,
+        'local_port': 5100,
+        'remote_port': 6100 }).start()
+
+    Timer(15, do_action, args=['stream_3', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'audio',
+        'clock_rate': 48000,
+        'encoding_name': 'OPUS',
+        'payload': 100,
+        'local_port': 5102,
+        'remote_port': 6101 }).start()
+
+    Timer(25, do_action, args=['stream_2', do_mixer_stream_dispose, 'mixer', 'stream_2']).start()
+    Timer(25, do_action, args=['stream_3', do_mixer_stream_dispose, 'mixer', 'stream_3']).start()
+
+    Timer(30, do_action, args=['stream_0', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'video',
+        'clock_rate': 90000,
+        'encoding_name': 'VP8',
+        'payload': 101,
+        'local_port': 5000,
+        'remote_port': 6000 }).start()
+
+    Timer(30, do_action, args=['stream_1', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'audio',
+        'clock_rate': 48000,
+        'encoding_name': 'OPUS',
+        'payload': 100,
+        'local_port': 5002,
+        'remote_port': 6001 }).start()
+
+    Timer(40, do_action, args=['stream_2', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'video',
+        'clock_rate': 90000,
+        'encoding_name': 'VP8',
+        'payload': 101,
+        'local_port': 5100,
+        'remote_port': 6100 }).start()
+
+    Timer(40, do_action, args=['stream_3', do_mixer_stream_init, 'mixer'], kwargs={
+        'media': 'audio',
+        'clock_rate': 48000,
+        'encoding_name': 'OPUS',
+        'payload': 100,
+        'local_port': 5102,
+        'remote_port': 6101 }).start()
+
+    Timer(50, do_action, args=['stream_0', do_mixer_stream_dispose, 'mixer', 'stream_0']).start()
+    Timer(50, do_action, args=['stream_1', do_mixer_stream_dispose, 'mixer', 'stream_1']).start()
+    Timer(60, do_action, args=['stream_2', do_mixer_stream_dispose, 'mixer', 'stream_2']).start()
+    Timer(60, do_action, args=['stream_3', do_mixer_stream_dispose, 'mixer', 'stream_3']).start()
+    Timer(70, do_action, args=['mixer', do_mixer_dispose, 'mixer']).start()
+    Timer(75, loop.quit).start()
 
     loop.run()
