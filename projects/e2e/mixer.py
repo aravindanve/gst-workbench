@@ -23,6 +23,7 @@ def do_mixer_init(**kwargs):
     mixer = Mixer()
 
     mixer.debug = kwargs.get('debug', False)
+    mixer.debug_output = kwargs.get('debug_output', False)
 
     mixer.disposed = False
     mixer.lock = Lock()
@@ -53,7 +54,7 @@ def do_mixer_init(**kwargs):
             mixer.audio_format, mixer.audio_rate, mixer.audio_channels, mixer.audio_layout))
 
     mixer.recv_rtpbin = Gst.ElementFactory.make('rtpbin', 'recv_rtpbin')
-    mixer.recv_rtpbin.set_property('autoremove', True) # FIXME: gc not running? only pads are removed
+    mixer.recv_rtpbin.set_property('autoremove', True) # FIXME: gc not removing elements, only pads are removed
     mixer.recv_rtpbin.set_property('drop-on-latency', True)
     mixer.pipeline.add(mixer.recv_rtpbin)
 
@@ -122,21 +123,203 @@ def do_mixer_init(**kwargs):
     multiqueue_sinkpad_1 = mixer.multiqueue.get_request_pad('sink_1')
     audiomixer_capsfilter_srcpad.link(multiqueue_sinkpad_1)
 
-    # FIXME: replace autovideosink with rtpsink
-    mixer.videosink = Gst.ElementFactory.make('autovideosink', 'videosink')
-    mixer.pipeline.add(mixer.videosink)
+    if mixer.debug_output:
+        mixer.videosink = Gst.ElementFactory.make('autovideosink', 'videosink')
+        mixer.pipeline.add(mixer.videosink)
 
-    multiqueue_srcpad_0 = mixer.multiqueue.get_static_pad('src_0')
-    videosink_sinkpad = mixer.videosink.get_static_pad('sink')
-    multiqueue_srcpad_0.link(videosink_sinkpad)
+        multiqueue_srcpad_0 = mixer.multiqueue.get_static_pad('src_0')
+        videosink_sinkpad = mixer.videosink.get_static_pad('sink')
+        multiqueue_srcpad_0.link(videosink_sinkpad)
 
-    # FIXME: replace autoaudiosink with rtpsink
-    mixer.audiosink = Gst.ElementFactory.make('autoaudiosink', 'audiosink')
-    mixer.pipeline.add(mixer.audiosink)
+        mixer.audiosink = Gst.ElementFactory.make('autoaudiosink', 'audiosink')
+        mixer.pipeline.add(mixer.audiosink)
 
-    multiqueue_srcpad_1 = mixer.multiqueue.get_static_pad('src_1')
-    audiosink_sinkpad = mixer.audiosink.get_static_pad('sink')
-    multiqueue_srcpad_1.link(audiosink_sinkpad)
+        multiqueue_srcpad_1 = mixer.multiqueue.get_static_pad('src_1')
+        audiosink_sinkpad = mixer.audiosink.get_static_pad('sink')
+        multiqueue_srcpad_1.link(audiosink_sinkpad)
+
+    else:
+        mixer.video_clock_rate = kwargs.get('clock_rate') or 90000
+        mixer.video_encoding_name = kwargs.get('encoding_name') or 'H264'
+        mixer.video_payload = kwargs.get('payload') or 101
+
+        mixer.audio_clock_rate = kwargs.get('clock_rate') or 48000
+        mixer.audio_encoding_name = kwargs.get('encoding_name') or 'OPUS'
+        mixer.audio_payload = kwargs.get('payload') or 100
+
+        if mixer.video_encoding_name not in ['H264']:
+            raise UnsupportedException('Unsupported video encoding: %s' % mixer.video_encoding_name)
+
+        if mixer.audio_encoding_name not in ['OPUS']:
+            raise UnsupportedException('Unsupported video encoding: %s' % mixer.audio_encoding_name)
+
+        mixer.video_paycaps = Gst.caps_from_string(
+            'application/x-rtp,media=video,clock-rate=%s,encoding-name=%s,payload=%s' % (
+                mixer.video_clock_rate, mixer.video_encoding_name, mixer.video_payload))
+
+        mixer.audio_paycaps = Gst.caps_from_string(
+            'application/x-rtp,media=audio,clock-rate=%s,encoding-name=%s,payload=%s' % (
+                mixer.audio_clock_rate, mixer.audio_encoding_name, mixer.audio_payload))
+
+        if mixer.video_encoding_name == 'H264':
+            mixer.multiqueue_videocapsfilter = Gst.ElementFactory.make('capsfilter', 'multiqueue_videocapsfilter')
+            mixer.multiqueue_videocapsfilter.set_property('caps', mixer.videocaps)
+            mixer.pipeline.add(mixer.multiqueue_videocapsfilter)
+
+            multiqueue_srcpad_0 = mixer.multiqueue.get_static_pad('src_0')
+            multiqueue_videocapsfilter_sinkpad = mixer.multiqueue_videocapsfilter.get_static_pad('sink')
+            multiqueue_srcpad_0.link(multiqueue_videocapsfilter_sinkpad)
+
+            mixer.video_enc = Gst.ElementFactory.make('x264enc', 'video_enc')
+            mixer.video_enc.set_property('subme', 1) # fast
+            mixer.pipeline.add(mixer.video_enc)
+
+            mixer.multiqueue_videocapsfilter.link(mixer.video_enc)
+
+            mixer.video_enc_capsfilter = Gst.ElementFactory.make('capsfilter', 'video_enc_capsfilter')
+            mixer.video_enc_capsfilter.set_property('caps',  Gst.caps_from_string('video/x-h264,profile=high'))
+            mixer.pipeline.add(mixer.video_enc_capsfilter)
+
+            mixer.video_enc.link(mixer.video_enc_capsfilter)
+
+            mixer.video_pay = Gst.ElementFactory.make('rtph264pay', 'video_pay')
+            mixer.pipeline.add(mixer.video_pay)
+
+            mixer.video_enc_capsfilter.link(mixer.video_pay)
+
+        mixer.video_pay_capsfilter = Gst.ElementFactory.make('capsfilter', 'video_pay_capsfilter')
+        mixer.video_pay_capsfilter.set_property('caps',  mixer.video_paycaps)
+        mixer.pipeline.add(mixer.video_pay_capsfilter)
+
+        mixer.video_pay.link(mixer.video_pay_capsfilter)
+
+        if mixer.audio_encoding_name == 'OPUS':
+            mixer.multiqueue_audiocapsfilter = Gst.ElementFactory.make('capsfilter', 'multiqueue_audiocapsfilter')
+            mixer.multiqueue_audiocapsfilter.set_property('caps', mixer.audiocaps)
+            mixer.pipeline.add(mixer.multiqueue_audiocapsfilter)
+
+            multiqueue_srcpad_1 = mixer.multiqueue.get_static_pad('src_1')
+            multiqueue_audiocapsfilter_sinkpad = mixer.multiqueue_audiocapsfilter.get_static_pad('sink')
+            multiqueue_srcpad_1.link(multiqueue_audiocapsfilter_sinkpad)
+
+            mixer.audioconvert = Gst.ElementFactory.make('audioconvert', 'audioconvert')
+            mixer.pipeline.add(mixer.audioconvert)
+
+            mixer.multiqueue_audiocapsfilter.link(mixer.audioconvert)
+
+            mixer.audioresample = Gst.ElementFactory.make('audioresample', 'audioresample')
+            mixer.pipeline.add(mixer.audioresample)
+
+            mixer.audioconvert.link(mixer.audioresample)
+
+            mixer.audioresample_capsfilter = Gst.ElementFactory.make('capsfilter', 'audioresample_capsfilter')
+            mixer.audioresample_capsfilter.set_property('caps',  Gst.caps_from_string(
+                'audio/x-raw,format=S16LE,rate=48000,layout=interleaved,channels=%s' % (
+                    mixer.audio_channels)))
+
+            mixer.pipeline.add(mixer.audioresample_capsfilter)
+
+            mixer.audioresample.link(mixer.audioresample_capsfilter)
+
+            mixer.audio_enc = Gst.ElementFactory.make('opusenc', 'audio_enc')
+            mixer.pipeline.add(mixer.audio_enc)
+
+            mixer.audioresample_capsfilter.link(mixer.audio_enc)
+
+            mixer.audio_enc_capsfilter = Gst.ElementFactory.make('capsfilter', 'audio_enc_capsfilter')
+            mixer.audio_enc_capsfilter.set_property('caps',  Gst.caps_from_string('audio/x-opus'))
+            mixer.pipeline.add(mixer.audio_enc_capsfilter)
+
+            mixer.audio_enc.link(mixer.audio_enc_capsfilter)
+
+            mixer.audio_pay = Gst.ElementFactory.make('rtpopuspay', 'audio_pay')
+            mixer.pipeline.add(mixer.audio_pay)
+
+            mixer.audio_enc_capsfilter.link(mixer.audio_pay)
+
+        mixer.audio_pay_capsfilter = Gst.ElementFactory.make('capsfilter', 'audio_pay_capsfilter')
+        mixer.audio_pay_capsfilter.set_property('caps',  mixer.audio_paycaps)
+        mixer.pipeline.add(mixer.audio_pay_capsfilter)
+
+        mixer.audio_pay.link(mixer.audio_pay_capsfilter)
+
+        mixer.send_rtpbin = Gst.ElementFactory.make('rtpbin', 'send_rtpbin')
+        mixer.send_rtpbin.set_property('drop-on-latency', True)
+        mixer.pipeline.add(mixer.send_rtpbin)
+
+        video_pay_capsfilter_srcpad = mixer.video_pay_capsfilter.get_static_pad('src')
+        send_rtpbin_rtp_sinkpad_0 = mixer.send_rtpbin.get_request_pad('send_rtp_sink_0')
+        video_pay_capsfilter_srcpad.link(send_rtpbin_rtp_sinkpad_0)
+
+        audio_pay_capsfilter_srcpad = mixer.audio_pay_capsfilter.get_static_pad('src')
+        send_rtpbin_rtp_sinkpad_1 = mixer.send_rtpbin.get_request_pad('send_rtp_sink_1')
+        audio_pay_capsfilter_srcpad.link(send_rtpbin_rtp_sinkpad_1)
+
+        mixer.video_remote_ip = kwargs.get('video_remote_ip') or '127.0.0.1'
+        mixer.video_remote_port = kwargs.get('video_remote_port') or 3000
+        mixer.send_rtcpsrc_0 = Gst.ElementFactory.make('udpsrc', 'send_rtcp_src_0')
+        mixer.send_rtcpsrc_0.set_property('port', mixer.video_remote_port)
+        mixer.send_rtcpsrc_0.set_property('address', mixer.video_remote_ip)
+        mixer.pipeline.add(mixer.send_rtcpsrc_0)
+
+        send_rtcpsrc_0_srcpad = mixer.send_rtcpsrc_0.get_static_pad('src')
+        send_rtpbin_rtcp_sinkpad_0 = mixer.send_rtpbin.get_request_pad('recv_rtcp_sink_0')
+        send_rtcpsrc_0_srcpad.link(send_rtpbin_rtcp_sinkpad_0)
+
+        mixer.audio_remote_ip = kwargs.get('audio_remote_ip') or '127.0.0.1'
+        mixer.audio_remote_port = kwargs.get('audio_remote_port') or 3001
+        mixer.send_rtcpsrc_1 = Gst.ElementFactory.make('udpsrc', 'send_rtcp_src_1')
+        mixer.send_rtcpsrc_1.set_property('port', mixer.audio_remote_port)
+        mixer.send_rtcpsrc_1.set_property('address', mixer.audio_remote_ip)
+        mixer.pipeline.add(mixer.send_rtcpsrc_1)
+
+        send_rtcpsrc_1_srcpad = mixer.send_rtcpsrc_1.get_static_pad('src')
+        send_rtpbin_rtcp_sinkpad_1 = mixer.send_rtpbin.get_request_pad('recv_rtcp_sink_1')
+        send_rtcpsrc_1_srcpad.link(send_rtpbin_rtcp_sinkpad_1)
+
+        mixer.video_local_ip = kwargs.get('video_local_ip') or '127.0.0.1'
+        mixer.video_local_port = kwargs.get('video_local_port') or 4000
+        mixer.send_rtpsink_0 = Gst.ElementFactory.make('udpsink', 'send_rtp_sink_0')
+        mixer.send_rtpsink_0.set_property('port', mixer.video_local_port)
+        mixer.send_rtpsink_0.set_property('host', mixer.video_local_ip)
+        mixer.pipeline.add(mixer.send_rtpsink_0)
+
+        mixer.send_rtcpsink_0 = Gst.ElementFactory.make('udpsink', 'send_rtcpsink_0')
+        mixer.send_rtcpsink_0.set_property('port', mixer.video_local_port + 1) # FIXME: use rtcp-mux
+        mixer.send_rtcpsink_0.set_property('host', mixer.video_local_ip)
+        mixer.send_rtcpsink_0.set_property('async', False)
+        mixer.send_rtcpsink_0.set_property('sync', False)
+        mixer.pipeline.add(mixer.send_rtcpsink_0)
+
+        send_rtpbin_rtp_srcpad_0 = mixer.send_rtpbin.get_static_pad('send_rtp_src_0')
+        send_rtpsrc_sinkpad_0 = mixer.send_rtpsink_0.get_static_pad('sink')
+        send_rtpbin_rtp_srcpad_0.link(send_rtpsrc_sinkpad_0)
+
+        send_rtpbin_rtcp_srcpad_0 = mixer.send_rtpbin.get_request_pad('send_rtcp_src_0')
+        send_rtcpsrc_sinkpad_0 = mixer.send_rtcpsink_0.get_static_pad('sink')
+        send_rtpbin_rtcp_srcpad_0.link(send_rtcpsrc_sinkpad_0)
+
+        mixer.audio_local_ip = kwargs.get('audio_local_ip') or '127.0.0.1'
+        mixer.audio_local_port = kwargs.get('audio_local_port') or 4002
+        mixer.send_rtpsink_1 = Gst.ElementFactory.make('udpsink', 'send_rtp_sink_1')
+        mixer.send_rtpsink_1.set_property('port', mixer.audio_local_port)
+        mixer.send_rtpsink_1.set_property('host', mixer.audio_local_ip)
+        mixer.pipeline.add(mixer.send_rtpsink_1)
+
+        mixer.send_rtcpsink_1 = Gst.ElementFactory.make('udpsink', 'send_rtcpsink_1')
+        mixer.send_rtcpsink_1.set_property('port', mixer.audio_local_port + 1) # FIXME: use rtcp-mux
+        mixer.send_rtcpsink_1.set_property('host', mixer.audio_local_ip)
+        mixer.send_rtcpsink_1.set_property('async', False)
+        mixer.send_rtcpsink_1.set_property('sync', False)
+        mixer.pipeline.add(mixer.send_rtcpsink_1)
+
+        send_rtpbin_rtp_srcpad_1 = mixer.send_rtpbin.get_static_pad('send_rtp_src_1')
+        send_rtpsrc_sinkpad_1 = mixer.send_rtpsink_1.get_static_pad('sink')
+        send_rtpbin_rtp_srcpad_1.link(send_rtpsrc_sinkpad_1)
+
+        send_rtpbin_rtcp_srcpad_1 = mixer.send_rtpbin.get_request_pad('send_rtcp_src_1')
+        send_rtcpsrc_sinkpad_1 = mixer.send_rtcpsink_1.get_static_pad('sink')
+        send_rtpbin_rtcp_srcpad_1.link(send_rtcpsrc_sinkpad_1)
 
     mixer.recv_rtpbin.connect('pad-added', _on_mixer_recv_rtpbin_pad_added, mixer)
     mixer.recv_rtpbin.connect('pad-added', _on_mixer_recv_rtpbin_pad_removed, mixer)
@@ -338,19 +521,19 @@ def do_mixer_stream_init(mixer, **kwargs):
 
     stream.remote_ip = kwargs.get('remote_ip') or '127.0.0.1'
     stream.remote_port = kwargs.get('remote_port') or 6000
-    stream.rtcpsink = Gst.ElementFactory.make('udpsink', '%s_rtcpsink' % stream.name)
-    stream.rtcpsink.set_property('port', stream.remote_port)
-    stream.rtcpsink.set_property('host', stream.remote_ip)
-    stream.rtcpsink.set_property('async', False)
-    stream.rtcpsink.set_property('sync', False)
+    stream.recv_rtcpsink = Gst.ElementFactory.make('udpsink', '%s_recv_rtcpsink' % stream.name)
+    stream.recv_rtcpsink.set_property('port', stream.remote_port)
+    stream.recv_rtcpsink.set_property('host', stream.remote_ip)
+    stream.recv_rtcpsink.set_property('async', False)
+    stream.recv_rtcpsink.set_property('sync', False)
 
-    mixer.pipeline.add(stream.rtcpsink)
+    mixer.pipeline.add(stream.recv_rtcpsink)
 
-    rtcpsink_sinkpad = stream.rtcpsink.get_static_pad('sink')
+    recv_rtcpsink_sinkpad = stream.recv_rtcpsink.get_static_pad('sink')
     recv_rtpbin_rtcp_srcpad = mixer.recv_rtpbin.get_request_pad('send_rtcp_src_%s' % stream.session)
-    recv_rtpbin_rtcp_srcpad.link(rtcpsink_sinkpad)
+    recv_rtpbin_rtcp_srcpad.link(recv_rtcpsink_sinkpad)
 
-    stream.rtcpsink.sync_state_with_parent()
+    stream.recv_rtcpsink.sync_state_with_parent()
 
     stream.rtpsrcbin = Gst.Bin('%s_rtpsrcbin' % stream.name)
 
@@ -369,15 +552,15 @@ def do_mixer_stream_init(mixer, **kwargs):
 
     mixer.pipeline.add(stream.rtpsrcbin)
 
-    rtpsrc_srcpad = stream.rtpsrcbin.rtpsrc.get_static_pad('src')
-    stream.rtpsrcbin.rtp_gsrcpad = Gst.GhostPad('rtp_src', rtpsrc_srcpad)
+    recv_rtpsrc_srcpad = stream.rtpsrcbin.rtpsrc.get_static_pad('src')
+    stream.rtpsrcbin.rtp_gsrcpad = Gst.GhostPad('rtp_src', recv_rtpsrc_srcpad)
     stream.rtpsrcbin.add_pad(stream.rtpsrcbin.rtp_gsrcpad)
 
     recv_rtpbin_rtp_sinkpad = mixer.recv_rtpbin.get_request_pad('recv_rtp_sink_%s' % stream.session)
     stream.rtpsrcbin.rtp_gsrcpad.link(recv_rtpbin_rtp_sinkpad)
 
-    rtcpsrc_srcpad = stream.rtpsrcbin.rtcpsrc.get_static_pad('src')
-    stream.rtpsrcbin.rtcp_gsrcpad = Gst.GhostPad('rtcp_src', rtcpsrc_srcpad)
+    recv_rtcpsrc_srcpad = stream.rtpsrcbin.rtcpsrc.get_static_pad('src')
+    stream.rtpsrcbin.rtcp_gsrcpad = Gst.GhostPad('rtcp_src', recv_rtcpsrc_srcpad)
     stream.rtpsrcbin.add_pad(stream.rtpsrcbin.rtcp_gsrcpad)
 
     recv_rtpbin_rtcp_sinkpad = mixer.recv_rtpbin.get_request_pad('recv_rtcp_sink_%s' % stream.session)
@@ -405,8 +588,8 @@ def _do_mixer_stream_dispose_cb(mixer, stream):
     stream.rtpsrcbin.set_state(Gst.State.NULL)
     mixer.pipeline.remove(stream.rtpsrcbin)
 
-    stream.rtcpsink.set_state(Gst.State.NULL)
-    mixer.pipeline.remove(stream.rtcpsink)
+    stream.recv_rtcpsink.set_state(Gst.State.NULL)
+    mixer.pipeline.remove(stream.recv_rtcpsink)
 
     stream.rtpdecodebin.set_state(Gst.State.NULL)
     mixer.pipeline.remove(stream.rtpdecodebin)
@@ -418,7 +601,7 @@ def _do_mixer_stream_dispose_cb(mixer, stream):
     mixer.pipeline.remove(stream.fakesink)
 
     stream.rtpsrcbin = None
-    stream.rtcpsink = None
+    stream.recv_rtcpsink = None
     stream.rtpdecodebin = None
     stream.rtpdecodetee = None
     stream.fakesink = None
@@ -586,8 +769,13 @@ if __name__ == '__main__':
 
     Timer(0, do_action, args=['mixer', do_mixer_init], kwargs={
         'debug': True,
+        'debug_output': False,
         'default_pattern': 'snow',
-        'default_wave': 'red-noise' }).start()
+        'default_wave': 'red-noise',
+        'video_local_port': 4000,
+        'video_remote_port': 3000,
+        'audio_local_port': 4002,
+        'audio_remote_port': 3001 }).start()
 
     Timer(2, do_action, args=[None, do_mixer_start, 'mixer']).start()
 
